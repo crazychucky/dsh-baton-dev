@@ -852,6 +852,10 @@ export const api = {
   async list_sessions(a = {}) {
     return (await useHost()) ? tag('host', await hostCall('list_sessions', a)) : tag('headless', listSessions(a))
   },
+  async read_tool_events(a) {
+    if (!(await useHost())) throw new Error('Reading tool events requires the modified dsh-baton-host plugin running inside DeepSeek Harness.')
+    return hostCall('read_tool_events', a)
+  },
   async read_session(a) {
     return (await useHost()) ? tag('host', await hostCall('read_session', a)) : tag('headless', readSession(a))
   },

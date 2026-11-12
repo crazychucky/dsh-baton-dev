@@ -312,6 +312,16 @@ const TOOLS = [
     },
   },
   {
+    name: 'dsh_read_tool_events',
+    annotations: annotations('Read raw tool events'),
+    description: 'Read committed tool/call and tool/result events joined by callId, never assistant summaries. Raw events include times and result content. Read-only; requires modified host. last: 1–50. About 240 KB output limit; oversized rows become explicitly marked JSON prefixes.',
+    inputSchema: { type: 'object', required: ['session_id'], properties: {
+      session_id: str('Desktop session id'), tool_name: str('Exact tool name filter'),
+      last: { ...int('Most recent matching calls', 10), minimum: 1, maximum: 50 },
+    } },
+    run: (a) => core.api.read_tool_events(a),
+  },
+  {
     name: 'dsh_status',
     annotations: annotations('Run status'),
     description: 'Look once at a run or a session without waiting. A run (run_id): state, recent events, final reply, waiting_on (sub-agents or jobs still working) and human_interjections. A session (session_id): busy, activity, its Harness goal (phase, rounds, whether Harness goes on with it), needs_input, and its last turn\'s reply. Never a way to wait: use dsh_wait.',

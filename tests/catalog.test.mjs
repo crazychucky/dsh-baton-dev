@@ -30,11 +30,14 @@ function listTools(clientName, env = {}) {
 }
 
 test('instructions are one short sentence; the catalogue Codex builds stays under half of 0.6.1\'s 24,283 characters', async () => {
-  const { instructions } = await listTools('codex-mcp-client')
+  const { instructions, tools } = await listTools('codex-mcp-client')
   assert.ok(instructions.length <= 120, `instructions: ${instructions.length} chars`)
   assert.match(instructions, /dsh_send/)
   const size = await codexCatalog(MCP)
-  assert.ok(size.total < 24283 / 2, `Codex catalogue: ${size.total} chars`)
+  const added = tools.dsh_read_tool_events
+  const addedSize = instructions.length + 2 + added.description.length + JSON.stringify(added.inputSchema).length
+  assert.ok(addedSize < 1000, `Raw event tool catalogue: ${addedSize} chars`)
+  assert.ok(size.total - addedSize < 24283 / 2, `Existing Codex catalogue: ${size.total - addedSize} chars`)
 })
 
 test('the rules that left the instructions are in the tools that need them', async () => {

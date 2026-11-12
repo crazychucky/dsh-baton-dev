@@ -1273,3 +1273,62 @@ test('status by session id: what it is doing, its goal and its last turn\'s repl
   const plain = await h.call('status', { session_id: 's2' })
   assert.equal('goal' in plain, false)
 })
+
+test('raw tool events correlate by callId and preserve evidence, errors and limits', async (t) => {
+  const call = (callId, name, args) => ({ type: 'tool/call', time: 100, data: { callId, name, arguments: args } })
+  const result = (toolCallId, content, isError) => ({ type: 'tool/result', time: 200, data: { message: { toolCallId, content, isError } } })
+  const log = [call('a', 'check', '{"a":1}'), call('b', 'check', '{}'),
+    result('b', [{ type: 'text', text: 'failed' }], true),
+    { type: 'assistant/message', data: { message: { content: [{ type: 'text', text: 'fake result' }] } } },
+    result('a', [{ type: 'text', text: '{"state":"succeeded","writes_enabled":false}' }], false),
+    call('c', 'pending', '{}'), result('orphan', [], false),
+    call('big', 'large', '{}'), result('big', [{ type: 'text', text: '\\"中文'.repeat(100000) }], false)]
+  const h = startHost({ log: { raw: log } }); t.after(h.close); await h.ready
+  const r = await h.call('read_tool_events', { session_id: 'raw', tool_name: 'check' })
+  assert.equal(r.total_matches, 2)
+  assert.deepEqual(r.events.map((e) => [e.call_id, e.state]), [['a', 'succeeded'], ['b', 'failed']])
+  assert.deepEqual(r.events[0].result_event.data, log[4].data)
+  assert.equal(r.events[0].arguments, '{"a":1}')
+  assert.equal(r.events[0].call_event.time, 100)
+  assert.equal(r.events[1].isError, true)
+  assert.equal((await h.call('read_tool_events', { session_id: 'raw', tool_name: 'missing' })).total_matches, 0)
+  const all = await h.call('read_tool_events', { session_id: 'raw' })
+  assert.equal(all.events[2].state, 'pending')
+  assert.equal(all.events[3].call_event, null)
+  assert.equal(all.truncated, true)
+  assert.ok(Buffer.byteLength(JSON.stringify(all)) < 245000)
+  assert.equal(all.events[4].truncated, true)
+  assert.ok(all.events[4].original_bytes > 240000)
+  const tail = await h.call('read_tool_events', { session_id: 'raw', tool_name: 'check', last: 1 })
+  assert.equal(tail.events[0].call_id, 'b')
+  assert.equal(tail.has_more, true)
+  for (const last of [0, -1, 51, 1.5, '10']) await assert.rejects(h.call('read_tool_events', { session_id: 'raw', last }), /last must/)
+  await assert.rejects(h.call('read_tool_events'), /session_id/)
+  assert.equal(h.calls.prompt.length, 0)
+  assert.equal(h.calls.cancel.length, 0)
+})
+
+test('MCP exposes raw events directly and via dsh_call over the existing host socket', async (t) => {
+  const h = startHost({ log: { wire: [
+    { type: 'tool/call', data: { callId: 'wire-id', name: 'check', arguments: '{}' } },
+    { type: 'tool/result', data: { message: { toolCallId: 'wire-id', isError: false, content: [{ type: 'text', text: 'actual result' }] } } },
+  ] } }); t.after(h.close); await h.ready
+  const { spawn } = await import('node:child_process')
+  const child = spawn(process.execPath, [path.resolve('src/mcp.mjs')], { env: { ...process.env, DSH_BATON_BACKEND: 'host' } })
+  let out = ''
+  child.stdout.on('data', (d) => { out += d })
+  const done = new Promise((resolve, reject) => { child.on('error', reject); child.on('close', resolve) })
+  child.stdin.end([
+    { id: 1, method: 'tools/list' },
+    { id: 2, method: 'tools/call', params: { name: 'dsh_read_tool_events', arguments: { session_id: 'wire' } } },
+    { id: 3, method: 'tools/call', params: { name: 'dsh_call', arguments: { name: 'dsh_read_tool_events', arguments: { session_id: 'wire' } } } },
+  ].map((r) => JSON.stringify({ jsonrpc: '2.0', ...r })).join('\n') + '\n')
+  assert.equal(await done, 0)
+  const replies = Object.fromEntries(out.trim().split('\n').map((l) => { const r = JSON.parse(l); return [r.id, r] }))
+  assert.equal(replies[1].result.tools.find((tool) => tool.name === 'dsh_read_tool_events').annotations.readOnlyHint, true)
+  for (const id of [2, 3]) {
+    const data = JSON.parse(replies[id].result.content[0].text)
+    assert.equal(data.events[0].result_event.data.message.content[0].text, 'actual result')
+  }
+  assert.equal(h.calls.prompt.length, 0)
+})

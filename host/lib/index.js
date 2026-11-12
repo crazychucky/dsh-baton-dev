@@ -763,6 +763,44 @@ export function apply(ctx) {
     return { meta: { cwd: items.find((it) => it.sessionId === sessionId)?.cwd ?? null }, events }
   }
 
+  // Evidence comes exclusively from committed tool events, never assistant text.
+  async function readToolEvents({ session_id, tool_name, last = 10 } = {}) {
+    if (typeof session_id !== 'string' || !session_id.trim()) throw new Error('session_id is required')
+    if (tool_name !== undefined && (typeof tool_name !== 'string' || !tool_name)) throw new Error('tool_name must be a nonempty string')
+    if (!Number.isInteger(last) || last < 1 || last > 50) throw new Error('last must be an integer from 1 to 50')
+    const { events } = await sessionLog(session_id)
+    const rows = [], calls = new Map()
+    for (const event of events) {
+      const d = event.data ?? {}
+      if (event.type === 'tool/call') {
+        const row = { call_id: d.callId ?? null, tool_name: d.name ?? null, arguments: d.arguments ?? null,
+          state: 'pending', isError: null, call_event: event, result_event: null }
+        rows.push(row)
+        if (d.callId) calls.set(d.callId, row)
+      } else if (event.type === 'tool/result') {
+        const id = d.message?.toolCallId
+        const row = (id && calls.get(id)) || { call_id: id ?? null, tool_name: null, arguments: null, call_event: null }
+        if (!rows.includes(row)) rows.push(row)
+        row.result_event = event
+        row.isError = d.message?.isError ?? null
+        row.state = d.message?.isError === true || d.error ? 'failed' : d.message?.isError === false ? 'succeeded' : 'completed'
+        if (id) calls.delete(id)
+      }
+    }
+    const matching = rows.filter((r) => tool_name === undefined || r.tool_name === tool_name)
+    const selected = matching.slice(-last)
+    const budget = Math.floor(240000 / selected.length) || 240000
+    const bounded = selected.map((row) => {
+      const json = JSON.stringify(row), original_bytes = Buffer.byteLength(json)
+      if (original_bytes <= budget) return { ...row, truncated: false }
+      let end = Math.min(json.length, budget)
+      while (Buffer.byteLength(JSON.stringify({ truncated: true, original_bytes, raw_json_prefix: json.slice(0, end) })) > budget) end = Math.floor(end * 0.8)
+      return { truncated: true, original_bytes, raw_json_prefix: json.slice(0, end) }
+    })
+    return { session_id, source: 'session_tool_events', total_matches: matching.length,
+      has_more: matching.length > last, truncated: bounded.some((r) => r.truncated), events: bounded }
+  }
+
   async function readSession({ session_id, last = 10 }) {
     const { meta, events } = await sessionLog(session_id)
     const messages = []
@@ -1367,6 +1405,7 @@ export function apply(ctx) {
     create_workspace: createWorkspace,
     list_sessions: listSessions,
     read_session: readSession,
+    read_tool_events: readToolEvents,
     models,
     send,
     status: async ({ run_id, session_id, tail }) => {
